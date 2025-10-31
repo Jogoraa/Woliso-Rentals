@@ -109,6 +109,7 @@ class Booking(BaseModel):
     status: str  # pending, approved, rejected
     message: Optional[str] = None
     requested_at: str
+    deposit_paid: Optional[bool] = False
 
 class BookingUpdate(BaseModel):
     status: str  # approved or rejected
