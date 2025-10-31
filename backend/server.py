@@ -133,6 +133,32 @@ class AdminStatsResponse(BaseModel):
     pending_houses: int
     total_bookings: int
 
+class PaymentInitRequest(BaseModel):
+    booking_id: str
+    amount: float = 500.0  # Default deposit amount in ETB
+    currency: str = "ETB"
+
+class PaymentInitResponse(BaseModel):
+    checkout_url: str
+    tx_ref: str
+
+class SavedHouseCreate(BaseModel):
+    house_id: str
+
+class SavedHouse(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    saved_id: str
+    tenant_id: str
+    house_id: str
+    saved_at: str
+
+class LandlordAnalytics(BaseModel):
+    total_properties: int
+    total_views: int
+    pending_bookings: int
+    approved_bookings: int
+    total_revenue: float
+
 # ============ UTILITY FUNCTIONS ============
 
 def hash_password(password: str) -> str:
