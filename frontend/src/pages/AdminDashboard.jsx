@@ -1,26 +1,35 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { useAuth } from '../context/AuthContext';
+import DashboardLayout from '../components/DashboardLayout';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
 import { toast } from 'sonner';
 import { Users, Home, Clock, CheckCircle, XCircle } from 'lucide-react';
+import { useSearchParams } from 'react-router-dom';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
 
 const AdminDashboard = () => {
   const { token } = useAuth();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [stats, setStats] = useState(null);
   const [pendingHouses, setPendingHouses] = useState([]);
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [activeTab, setActiveTab] = useState(searchParams.get('tab') || 'overview');
 
   useEffect(() => {
     fetchAdminData();
   }, []);
+
+  useEffect(() => {
+    const tab = searchParams.get('tab');
+    if (tab) setActiveTab(tab);
+  }, [searchParams]);
 
   const fetchAdminData = async () => {
     try {
@@ -152,19 +161,21 @@ const AdminDashboard = () => {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center" data-testid="loading-state">
-        <p className="text-gray-600">Loading...</p>
-      </div>
+      <DashboardLayout>
+        <div className="flex items-center justify-center h-96" data-testid="loading-state">
+          <p className="text-gray-600">Loading...</p>
+        </div>
+      </DashboardLayout>
     );
   }
 
   return (
-    <div className="min-h-screen py-8" data-testid="admin-dashboard">
-      <div className="container mx-auto px-4">
+    <DashboardLayout>
+      <div data-testid="admin-dashboard">
         <h1 className="text-3xl font-bold text-gray-800 mb-8">Admin Dashboard</h1>
 
         {/* Stats Grid */}
-        {stats && (
+        {stats && activeTab === 'overview' && (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
             <StatCard
               title="Total Users"
@@ -193,8 +204,14 @@ const AdminDashboard = () => {
           </div>
         )}
 
-        <Tabs defaultValue="pending" className="w-full">
+        <Tabs value={activeTab} onValueChange={(val) => {
+          setActiveTab(val);
+          setSearchParams({ tab: val });
+        }} className="w-full">
           <TabsList className="mb-6">
+            <TabsTrigger value="overview" data-testid="tab-overview">
+              Overview
+            </TabsTrigger>
             <TabsTrigger value="pending" data-testid="tab-pending-houses">
               Pending Houses ({pendingHouses.length})
             </TabsTrigger>
@@ -202,6 +219,27 @@ const AdminDashboard = () => {
               All Users ({users.length})
             </TabsTrigger>
           </TabsList>
+
+          <TabsContent value="overview">
+            <div className="space-y-6">
+              <Card>
+                <CardHeader>
+                  <CardTitle>Recent Pending Approvals</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {pendingHouses.length === 0 ? (
+                    <p className="text-gray-600 text-center py-4">No pending houses for approval.</p>
+                  ) : (
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                      {pendingHouses.slice(0, 3).map(house => (
+                        <HouseCard key={house.house_id} house={house} />
+                      ))}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            </div>
+          </TabsContent>
 
           <TabsContent value="pending">
             {pendingHouses.length === 0 ? (
@@ -229,7 +267,7 @@ const AdminDashboard = () => {
           </TabsContent>
         </Tabs>
       </div>
-    </div>
+    </DashboardLayout>
   );
 };
 
