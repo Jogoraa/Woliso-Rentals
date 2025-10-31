@@ -549,6 +549,261 @@ async def get_house_feedback(house_id: str):
     ).to_list(1000)
     return feedbacks
 
+# ============ PAYMENT ROUTES ============
+
+@api_router.post("/payment/initialize", response_model=PaymentInitResponse)
+async def initialize_payment(
+    payment_data: PaymentInitRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """Initialize Chapa payment for booking deposit"""
+    await require_role(current_user, ["tenant"])
+    
+    # Verify booking exists and belongs to current user
+    booking = await db.bookings.find_one({
+        "booking_id": payment_data.booking_id,
+        "tenant_id": current_user["user_id"]
+    })
+    
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    
+    if booking["status"] != "approved":
+        raise HTTPException(status_code=400, detail="Only approved bookings can proceed to payment")
+    
+    # Check if payment already exists
+    existing_payment = await db.payments.find_one({"booking_id": payment_data.booking_id})
+    if existing_payment and existing_payment.get("status") == "success":
+        raise HTTPException(status_code=400, detail="Payment already completed for this booking")
+    
+    # Generate unique transaction reference
+    tx_ref = f"WRS-{payment_data.booking_id}-{uuid.uuid4().hex[:8]}"
+    
+    # Get house details for callback URL
+    house = await db.houses.find_one({"house_id": booking["house_id"]})
+    
+    # Split full name for Chapa
+    name_parts = current_user["full_name"].split(" ", 1)
+    first_name = name_parts[0]
+    last_name = name_parts[1] if len(name_parts) > 1 else ""
+    
+    # Prepare callback URL (frontend will handle the redirect)
+    callback_url = os.environ.get('FRONTEND_URL', 'http://localhost:3000') + f"/payment/callback?tx_ref={tx_ref}"
+    
+    try:
+        # Initialize payment with Chapa
+        chapa_response = chapa_service.initialize_payment(
+            amount=payment_data.amount,
+            currency=payment_data.currency,
+            tx_ref=tx_ref,
+            callback_url=callback_url,
+            email=current_user["email"],
+            first_name=first_name,
+            last_name=last_name,
+            phone_number=current_user.get("phone_number")
+        )
+        
+        # Store payment record
+        payment_doc = {
+            "payment_id": str(uuid.uuid4()),
+            "booking_id": payment_data.booking_id,
+            "tenant_id": current_user["user_id"],
+            "house_id": booking["house_id"],
+            "tx_ref": tx_ref,
+            "amount": payment_data.amount,
+            "currency": payment_data.currency,
+            "status": "pending",
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+        
+        await db.payments.insert_one(payment_doc)
+        
+        return PaymentInitResponse(
+            checkout_url=chapa_response["data"]["checkout_url"],
+            tx_ref=tx_ref
+        )
+    except Exception as e:
+        logger.error(f"Payment initialization error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.get("/payment/verify/{tx_ref}")
+async def verify_payment(
+    tx_ref: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Verify payment status with Chapa"""
+    
+    # Find payment record
+    payment = await db.payments.find_one({"tx_ref": tx_ref})
+    if not payment:
+        raise HTTPException(status_code=404, detail="Payment record not found")
+    
+    # Verify user has access to this payment
+    if payment["tenant_id"] != current_user["user_id"] and current_user["role"] not in ["admin", "landlord"]:
+        raise HTTPException(status_code=403, detail="Not authorized to verify this payment")
+    
+    try:
+        # Verify with Chapa
+        chapa_response = chapa_service.verify_payment(tx_ref)
+        
+        if chapa_response["status"] == "success" and chapa_response["data"]["status"] == "success":
+            # Update payment status
+            await db.payments.update_one(
+                {"tx_ref": tx_ref},
+                {"$set": {
+                    "status": "success",
+                    "verified_at": datetime.now(timezone.utc).isoformat(),
+                    "chapa_response": chapa_response["data"]
+                }}
+            )
+            
+            # Update booking to mark deposit as paid
+            await db.bookings.update_one(
+                {"booking_id": payment["booking_id"]},
+                {"$set": {"deposit_paid": True}}
+            )
+            
+            return {
+                "status": "success",
+                "message": "Payment verified successfully",
+                "data": chapa_response["data"]
+            }
+        else:
+            # Payment failed
+            await db.payments.update_one(
+                {"tx_ref": tx_ref},
+                {"$set": {
+                    "status": "failed",
+                    "verified_at": datetime.now(timezone.utc).isoformat()
+                }}
+            )
+            return {
+                "status": "failed",
+                "message": "Payment verification failed"
+            }
+    except Exception as e:
+        logger.error(f"Payment verification error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============ SAVED HOUSES ROUTES ============
+
+@api_router.post("/tenant/save-house/{house_id}")
+async def save_house(
+    house_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Save/favorite a house"""
+    await require_role(current_user, ["tenant"])
+    
+    # Check if house exists
+    house = await db.houses.find_one({"house_id": house_id})
+    if not house:
+        raise HTTPException(status_code=404, detail="House not found")
+    
+    # Check if already saved
+    existing = await db.saved_houses.find_one({
+        "tenant_id": current_user["user_id"],
+        "house_id": house_id
+    })
+    
+    if existing:
+        # Unsave (toggle behavior)
+        await db.saved_houses.delete_one({
+            "tenant_id": current_user["user_id"],
+            "house_id": house_id
+        })
+        return {"message": "House removed from favorites", "saved": False}
+    else:
+        # Save house
+        saved_doc = {
+            "saved_id": str(uuid.uuid4()),
+            "tenant_id": current_user["user_id"],
+            "house_id": house_id,
+            "saved_at": datetime.now(timezone.utc).isoformat()
+        }
+        await db.saved_houses.insert_one(saved_doc)
+        return {"message": "House added to favorites", "saved": True}
+
+@api_router.get("/tenant/saved-houses", response_model=List[House])
+async def get_saved_houses(current_user: dict = Depends(get_current_user)):
+    """Get all saved houses for current tenant"""
+    await require_role(current_user, ["tenant"])
+    
+    # Get saved house IDs
+    saved_records = await db.saved_houses.find(
+        {"tenant_id": current_user["user_id"]},
+        {"_id": 0, "house_id": 1}
+    ).to_list(1000)
+    
+    house_ids = [record["house_id"] for record in saved_records]
+    
+    if not house_ids:
+        return []
+    
+    # Fetch house details
+    houses = await db.houses.find(
+        {"house_id": {"$in": house_ids}},
+        {"_id": 0}
+    ).to_list(1000)
+    
+    return houses
+
+@api_router.get("/tenant/is-saved/{house_id}")
+async def check_if_saved(
+    house_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Check if a house is saved by current tenant"""
+    await require_role(current_user, ["tenant"])
+    
+    saved = await db.saved_houses.find_one({
+        "tenant_id": current_user["user_id"],
+        "house_id": house_id
+    })
+    
+    return {"saved": saved is not None}
+
+# ============ LANDLORD ANALYTICS ROUTES ============
+
+@api_router.get("/landlord/analytics", response_model=LandlordAnalytics)
+async def get_landlord_analytics(current_user: dict = Depends(get_current_user)):
+    """Get analytics for landlord dashboard"""
+    await require_role(current_user, ["landlord"])
+    
+    # Count total properties
+    total_properties = await db.houses.count_documents({"landlord_id": current_user["user_id"]})
+    
+    # Count bookings
+    pending_bookings = await db.bookings.count_documents({
+        "landlord_id": current_user["user_id"],
+        "status": "pending"
+    })
+    
+    approved_bookings = await db.bookings.count_documents({
+        "landlord_id": current_user["user_id"],
+        "status": "approved"
+    })
+    
+    # Calculate total revenue from rented properties
+    rented_houses = await db.houses.find(
+        {"landlord_id": current_user["user_id"], "status": "rented"},
+        {"_id": 0, "price_per_month": 1}
+    ).to_list(1000)
+    
+    total_revenue = sum(house.get("price_per_month", 0) for house in rented_houses)
+    
+    # For views, we'll use a placeholder since we haven't implemented view tracking
+    # In a real app, you'd track this with each house view
+    total_views = total_properties * 10  # Placeholder calculation
+    
+    return LandlordAnalytics(
+        total_properties=total_properties,
+        total_views=total_views,
+        pending_bookings=pending_bookings,
+        approved_bookings=approved_bookings,
+        total_revenue=total_revenue
+    )
+
 # ============ ADMIN ROUTES ============
 
 @api_router.get("/admin/stats", response_model=AdminStatsResponse)
