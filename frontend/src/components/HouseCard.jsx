@@ -1,13 +1,67 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { MapPin, BedDouble, DollarSign } from 'lucide-react';
+import { MapPin, BedDouble, DollarSign, Heart } from 'lucide-react';
 import { Card, CardContent, CardFooter } from './ui/card';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
+import { useAuth } from '../context/AuthContext';
+import axios from 'axios';
+import { toast } from 'sonner';
 
-const HouseCard = ({ house }) => {
+const HouseCard = ({ house, onSaveToggle }) => {
   const navigate = useNavigate();
+  const { user, token } = useAuth();
+  const [isSaved, setIsSaved] = useState(false);
+  const [checkingSaved, setCheckingSaved] = useState(false);
   const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
+  const API = `${BACKEND_URL}/api`;
+
+  useEffect(() => {
+    if (user?.role === 'tenant' && token) {
+      checkIfSaved();
+    }
+  }, [house.house_id, user, token]);
+
+  const checkIfSaved = async () => {
+    try {
+      setCheckingSaved(true);
+      const response = await axios.get(`${API}/tenant/is-saved/${house.house_id}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      setIsSaved(response.data.saved);
+    } catch (error) {
+      console.error('Failed to check if saved', error);
+    } finally {
+      setCheckingSaved(false);
+    }
+  };
+
+  const handleSaveToggle = async (e) => {
+    e.stopPropagation();
+    
+    if (!user) {
+      toast.error('Please login to save houses');
+      return;
+    }
+
+    if (user.role !== 'tenant') {
+      toast.error('Only tenants can save houses');
+      return;
+    }
+
+    try {
+      const response = await axios.post(
+        `${API}/tenant/save-house/${house.house_id}`,
+        {},
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      setIsSaved(response.data.saved);
+      toast.success(response.data.message);
+      if (onSaveToggle) onSaveToggle();
+    } catch (error) {
+      toast.error('Failed to update saved status');
+    }
+  };
 
   const getStatusColor = (status) => {
     switch (status) {
