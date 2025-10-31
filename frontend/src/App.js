@@ -9,6 +9,7 @@ import HouseDetailsPage from './pages/HouseDetailsPage';
 import TenantDashboard from './pages/TenantDashboard';
 import LandlordDashboard from './pages/LandlordDashboard';
 import AdminDashboard from './pages/AdminDashboard';
+import PaymentCallback from './pages/PaymentCallback';
 import { Toaster } from 'sonner';
 import './App.css';
 
