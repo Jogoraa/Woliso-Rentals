@@ -38,6 +38,7 @@ function App() {
             <Route path="/login" element={<LoginPage />} />
             <Route path="/register" element={<RegisterPage />} />
             <Route path="/house/:id" element={<HouseDetailsPage />} />
+            <Route path="/payment/callback" element={<PaymentCallback />} />
             <Route 
               path="/tenant/dashboard" 
               element={
