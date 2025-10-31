@@ -79,7 +79,7 @@ const HouseCard = ({ house, onSaveToggle }) => {
 
   return (
     <Card 
-      className="card-hover cursor-pointer overflow-hidden" 
+      className="card-hover cursor-pointer overflow-hidden relative" 
       onClick={() => navigate(`/house/${house.house_id}`)}
       data-testid={`house-card-${house.house_id}`}
     >
@@ -93,6 +93,22 @@ const HouseCard = ({ house, onSaveToggle }) => {
         <Badge className={`absolute top-2 right-2 ${getStatusColor(house.status)}`}>
           {house.status.replace('_', ' ')}
         </Badge>
+        
+        {/* Save/Favorite Button */}
+        {user?.role === 'tenant' && (
+          <Button
+            size="icon"
+            variant="secondary"
+            className={`absolute top-2 left-2 rounded-full ${isSaved ? 'bg-red-500 hover:bg-red-600' : 'bg-white/90 hover:bg-white'}`}
+            onClick={handleSaveToggle}
+            disabled={checkingSaved}
+            data-testid="save-house-btn"
+          >
+            <Heart 
+              className={`w-5 h-5 ${isSaved ? 'fill-white text-white' : 'text-gray-700'}`}
+            />
+          </Button>
+        )}
       </div>
       
       <CardContent className="p-4">
