@@ -14,7 +14,7 @@ from datetime import datetime, timezone, timedelta
 import jwt
 from passlib.context import CryptContext
 import shutil
-from chapa_service import chapa_service
+from chapa_service import ChapaService, PaymentGatewayError 
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -29,6 +29,7 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 JWT_SECRET = os.environ.get('JWT_SECRET', 'your-secret-key-change-in-production')
 JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
+CHAPA_SECRET_KEY = os.environ.get('CHAPA_SECRET_KEY', '')
 
 security = HTTPBearer()
 
@@ -174,6 +175,14 @@ def create_access_token(data: dict) -> str:
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, JWT_SECRET, algorithm=JWT_ALGORITHM)
     return encoded_jwt
+
+
+def generate_transaction_reference(prefix: str = "WRS") -> str:
+    """Generate a short transaction reference used for payments.
+
+    Example: WRS-<8hex>
+    """
+    return f"{prefix}-{uuid.uuid4().hex[:8]}"
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
     token = credentials.credentials
@@ -552,6 +561,24 @@ async def get_house_feedback(house_id: str):
 
 # ============ PAYMENT ROUTES ============
 
+
+@api_router.get("/payment/health")
+async def payment_health_check():
+    """Check if payment service is healthy"""
+    if chapa_service is None:
+        raise HTTPException(status_code=503, detail="Payment service not configured")
+    
+    try:
+        # Try to get supported currencies as a health check
+        currencies = chapa_service.get_supported_currencies()
+        return {
+            "status": "healthy",
+            "service": "chapa",
+            "currencies_available": len(currencies.get('currencies', []))
+        }
+    except PaymentGatewayError as e:
+        raise HTTPException(status_code=503, detail=f"Payment service unhealthy: {str(e)}")
+    
 @api_router.post("/payment/initialize", response_model=PaymentInitResponse)
 async def initialize_payment(
     payment_data: PaymentInitRequest,
@@ -559,6 +586,13 @@ async def initialize_payment(
 ):
     """Initialize Chapa payment for booking deposit"""
     await require_role(current_user, ["tenant"])
+    
+    # Check if Chapa service is available
+    if chapa_service is None:
+        raise HTTPException(
+            status_code=503, 
+            detail="Payment service is currently unavailable. Please try again later."
+        )
     
     # Verify booking exists and belongs to current user
     booking = await db.bookings.find_one({
@@ -589,7 +623,9 @@ async def initialize_payment(
     last_name = name_parts[1] if len(name_parts) > 1 else ""
     
     # Prepare callback URL (frontend will handle the redirect)
-    callback_url = os.environ.get('FRONTEND_URL', 'http://localhost:3000') + f"/payment/callback?tx_ref={tx_ref}"
+    frontend_url = os.environ.get('FRONTEND_URL', 'http://localhost:3000')
+    callback_url = f"{frontend_url}/payment/callback?tx_ref={tx_ref}"
+    return_url = f"{frontend_url}/payment/success?tx_ref={tx_ref}"
     
     try:
         # Initialize payment with Chapa
@@ -598,6 +634,7 @@ async def initialize_payment(
             currency=payment_data.currency,
             tx_ref=tx_ref,
             callback_url=callback_url,
+            return_url=return_url,  # Added return_url
             email=current_user["email"],
             first_name=first_name,
             last_name=last_name,
@@ -623,9 +660,23 @@ async def initialize_payment(
             checkout_url=chapa_response["data"]["checkout_url"],
             tx_ref=tx_ref
         )
+    except PaymentGatewayError as e:
+        # Surface gateway HTTP errors (e.g. 401 Unauthorized) to the client with a reasonable status
+        status_code = e.status_code if (e.status_code and 100 <= e.status_code < 600) else 502
+        logger.error(f"Payment initialization error: {str(e)} (status={e.status_code})")
+        
+        # Provide more user-friendly error messages
+        if e.status_code == 401:
+            error_detail = "Payment authentication failed. Please contact support."
+        elif e.status_code == 400:
+            error_detail = f"Invalid payment request: {str(e)}"
+        else:
+            error_detail = str(e)
+            
+        raise HTTPException(status_code=status_code, detail=error_detail)
     except Exception as e:
-        logger.error(f"Payment initialization error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Unexpected payment initialization error: {str(e)}")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred while initializing payment")
 
 @api_router.get("/payment/verify/{tx_ref}")
 async def verify_payment(
